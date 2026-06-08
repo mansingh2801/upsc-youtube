@@ -4,7 +4,7 @@
 #   1. Normalize all clips → 1280×720, 30fps, no audio
 #   2. Concatenate (loop if needed to cover voice duration)
 #   3. Merge with voiceover audio
-#   4. Add text overlays: title card + "UPSC Daily" watermark
+#   4. Add text overlays: title card + "IAS Brief" watermark
 #   5. Fade in/out
 #   Output: MP4 H.264, AAC audio
 # ================================================================
@@ -125,7 +125,7 @@ def _render_final(video_path, audio_path, title, voice_duration, output_path):
         (
             f"drawtext="
             f"fontfile={FONT_PATH}:"
-            f"text='UPSC Daily':"
+            f"text='IAS Brief':"
             f"fontsize=22:fontcolor=white@0.75:"
             f"x=w-text_w-18:y=16:"
             f"box=1:boxcolor=black@0.45:boxborderw=8"
