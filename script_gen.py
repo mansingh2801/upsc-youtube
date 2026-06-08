@@ -4,8 +4,7 @@
 # ================================================================
 
 import os
-from openai import OpenAI
-
+import google.generativeai as genai
 
 def generate_upsc_script(topic=None):
     """
