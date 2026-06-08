@@ -4,7 +4,7 @@
 #  Run by GitHub Actions daily at 7 AM IST
 #
 #  Flow:
-#   DeepSeek → Script
+#   GEMINI → Script
 #   Kokoro   → Voice (WAV)
 #   Pexels   → Stock footage clips
 #   FFmpeg   → Final MP4
@@ -29,11 +29,10 @@ def cleanup():
         except Exception:
             pass
 
-
 def check_env():
     """Verify all required environment variables are set."""
     required = [
-        'DEEPSEEK_API_KEY',
+        'GEMINI_API_KEY',
         'PEXELS_API_KEY',
         'YOUTUBE_CLIENT_ID',
         'YOUTUBE_CLIENT_SECRET',
