@@ -33,7 +33,9 @@ jobs:
           key: kokoro-model-v1
 
       - name: 🎬 Install FFmpeg
-        run: sudo apt-get install -y ffmpeg fonts-dejavu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu --fix-missing
 
       - name: 📥 Install Python dependencies
         run: pip install -r requirements.txt
