@@ -35,12 +35,21 @@ Open with a surprising fact or hook question about this article.
 Cover: What happened | Background context | Why it matters for India | UPSC exam angle (GS paper, related topics, possible questions).
 End with: Like and subscribe for daily UPSC current affairs.]"""
 
-    res = client.models.generate_content(
-        model='gemini-3.5-flash',
-        contents=prompt
-    )
-    return _parse(res.text.strip(), article['title'])
-
+import time
+    for attempt in range(3):
+        try:
+            res = client.models.generate_content(
+                model='gemini-3.5-flash',
+                contents=prompt
+            )
+            return _parse(res.text.strip(), article['title'])
+        except Exception as e:
+            if '503' in str(e) and attempt < 2:
+                wait = (attempt + 1) * 20
+                print(f'  ⏳ Gemini 503 — retrying in {wait}s...')
+                time.sleep(wait)
+            else:
+                raise
 
 def _parse(raw, fallback_topic):
     def extract(label):
