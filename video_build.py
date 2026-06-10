@@ -1,171 +1,195 @@
 # ================================================================
-#  video_build.py — FFmpeg Video Builder
-#  Steps:
-#   1. Normalize all clips → 1280×720, 30fps, no audio
-#   2. Concatenate (loop if needed to cover voice duration)
-#   3. Merge with voiceover audio
-#   4. Add text overlays: title card + "IAS Brief" watermark
-#   5. Fade in/out
-#   Output: MP4 H.264, AAC audio
+#  video_build.py — Dark Background Video Builder
+#  Professional text-overlay style (no stock footage needed)
+#  Design: Dark navy bg + orange accents + timed key points
 # ================================================================
 
 import os
-import json
 import subprocess
 
+FONT_BOLD    = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+FONT_REGULAR = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+BG_COLOR     = '0D1B2A'   # dark navy
+ACCENT       = 'F4A261'   # warm orange
+TITLE_SECS   = 8          # seconds for title card
 
-FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 
-
-def build_video(clips, voice_path, title, output_path='output.mp4', voice_duration=180):
+def build_video(script_data, voice_path, output_path='output.mp4', voice_duration=180):
     """
-    Build final MP4 from clips + voice.
-    Returns output_path.
+    Build a professional dark-background UPSC video.
+    No stock footage — clean text overlays on dark background.
     """
-    print(f'  📐 Normalizing {len(clips)} clips...')
-    normalized = _normalize_clips(clips)
+    title      = script_data.get('title', 'UPSC Daily')
+    topic      = script_data.get('topic', title)[:55]
+    source     = script_data.get('source', 'PIB')
+    key_points = script_data.get('key_points', [])
 
-    if not normalized:
-        raise Exception('All clip normalizations failed.')
+    if not key_points:
+        key_points = ['Key facts from today\'s article']
 
-    print('  🔗 Concatenating clips...')
-    concat_path = _concatenate_clips(normalized, voice_duration)
-
-    print('  🎨 Rendering final video...')
-    _render_final(concat_path, voice_path, title, voice_duration, output_path)
-
-    size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f'  ✅ Final video: {output_path} ({size_mb:.1f} MB)')
-    return output_path
-
-
-# ── Step 1: Normalize ─────────────────────────────────────────────
-
-def _normalize_clips(clips):
-    normalized = []
-    for i, clip in enumerate(clips):
-        out = clip['path'].replace('.mp4', '_norm.mp4')
-        cmd = [
-            'ffmpeg', '-i', clip['path'],
-            '-vf', (
-                'scale=1280:720:force_original_aspect_ratio=decrease,'
-                'pad=1280:720:(ow-iw)/2:(oh-ih)/2:black,'
-                'setsar=1'
-            ),
-            '-r', '30',
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
-            '-an',                  # strip original audio
-            '-y', out
-        ]
-        result = subprocess.run(cmd, capture_output=True)
-        if result.returncode == 0:
-            normalized.append(out)
-        else:
-            print(f'  ⚠️ Normalize failed for clip {i}: {result.stderr.decode()[:120]}')
-    return normalized
-
-
-# ── Step 2: Concatenate (loop to cover voice) ─────────────────────
-
-def _concatenate_clips(normalized, target_sec):
-    # Loop clips until we have enough footage
-    clips_to_use = []
-    total = 0
-    while total < target_sec + 10:
-        for c in normalized:
-            clips_to_use.append(c)
-            total += _get_duration(c)
-            if total >= target_sec + 10:
-                break
-
-    concat_list = 'concat_list.txt'
-    with open(concat_list, 'w') as f:
-        for c in clips_to_use:
-            f.write(f"file '{os.path.abspath(c)}'\n")
-
-    concat_path = 'concat_raw.mp4'
-    cmd = [
-        'ffmpeg',
-        '-f', 'concat', '-safe', '0', '-i', concat_list,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
-        '-t', str(int(target_sec) + 3),
-        '-an',
-        '-y', concat_path
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise Exception('Concat failed: ' + result.stderr.decode()[:300])
-    return concat_path
-
-
-# ── Step 3: Render final with audio + text overlays ───────────────
-
-def _render_final(video_path, audio_path, title, voice_duration, output_path):
-    safe_title = _esc(title[:55] + ('…' if len(title) > 55 else ''))
-
-    fade_out_start = max(voice_duration - 1.5, voice_duration * 0.95)
-
-    vf = ','.join([
-        # Fade in 1.5s / fade out 1.5s
-        f'fade=t=in:st=0:d=1.5',
-        f'fade=t=out:st={fade_out_start:.1f}:d=1.5',
-
-        # ── Title card: bottom of screen, visible for first 6 seconds ──
-        (
-            f"drawtext="
-            f"fontfile={FONT_PATH}:"
-            f"text='{safe_title}':"
-            f"fontsize=38:fontcolor=white:"
-            f"x=(w-text_w)/2:y=h*0.83:"
-            f"box=1:boxcolor=black@0.65:boxborderw=14:"
-            f"enable='between(t,0,6)'"
-        ),
-
-        # ── Watermark: top-right, always visible ──
-        (
-            f"drawtext="
-            f"fontfile={FONT_PATH}:"
-            f"text='IAS Brief':"
-            f"fontsize=22:fontcolor=white@0.75:"
-            f"x=w-text_w-18:y=16:"
-            f"box=1:boxcolor=black@0.45:boxborderw=8"
-        ),
-    ])
+    vf = _build_filter(title, topic, source, key_points, voice_duration)
 
     cmd = [
         'ffmpeg',
-        '-i', video_path,
-        '-i', audio_path,
+        '-f', 'lavfi',
+        '-i', f'color=c=#{BG_COLOR}:size=1280x720:rate=30:duration={voice_duration + 2}',
+        '-i', voice_path,
         '-vf', vf,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '24',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
         '-c:a', 'aac', '-b:a', '128k',
-        '-map', '0:v',
-        '-map', '1:a',
-        '-shortest',          # trim to whichever ends first (voice)
+        '-map', '0:v', '-map', '1:a',
+        '-shortest',
         '-movflags', '+faststart',
         '-y', output_path
     ]
+
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
-        raise Exception('Final render failed: ' + result.stderr.decode()[:400])
+        raise Exception('Video build failed: ' + result.stderr.decode()[-400:])
+
+    size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    print(f'  ✅ Video ready: {output_path} ({size_mb:.1f} MB)')
+    return output_path
 
 
-# ── Helpers ───────────────────────────────────────────────────────
+def _build_filter(title, topic, source, key_points, voice_duration):
+    f = []
 
-def _get_duration(path):
-    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-           '-of', 'json', path]
-    result = subprocess.run(cmd, capture_output=True)
-    try:
-        return float(json.loads(result.stdout)['format']['duration'])
-    except Exception:
-        return 60
+    td = min(TITLE_SECS, voice_duration * 0.15)   # title card duration
+    remaining  = voice_duration - td
+    point_dur  = remaining / len(key_points)
+
+    # ── Top accent bar ────────────────────────────────────────────
+    f.append(f'drawbox=x=0:y=0:w=iw:h=6:color=#{ACCENT}@1:t=fill')
+
+    # ── Progress bar (grows left to right, orange) ────────────────
+    f.append(
+        f"drawbox=x=0:y=714:w='iw*t/{voice_duration:.0f}':h=6"
+        f":color=#{ACCENT}@1:t=fill"
+    )
+
+    # ── IAS Brief watermark (always visible) ──────────────────────
+    f.append(
+        f"drawtext=fontfile={FONT_BOLD}:text='IAS Brief':"
+        f"fontsize=28:fontcolor=#{ACCENT}:x=36:y=22"
+    )
+
+    # ── Source badge top right ────────────────────────────────────
+    f.append(
+        f"drawtext=fontfile={FONT_BOLD}:text='[ {_esc(source)} ]':"
+        f"fontsize=24:fontcolor=#{ACCENT}:x=w-tw-36:y=26"
+    )
+
+    # ════════════════════════════════════════════════════════════
+    # TITLE CARD (0 → td seconds)
+    # ════════════════════════════════════════════════════════════
+
+    title_lines = _wrap(title, 34)
+    y0 = 280 - (len(title_lines) * 58) // 2
+    for i, line in enumerate(title_lines[:3]):
+        f.append(
+            f"drawtext=fontfile={FONT_BOLD}:text='{_esc(line)}':"
+            f"fontsize=50:fontcolor=white:"
+            f"x=(w-tw)/2:y={y0 + i*58}:"
+            f"enable='between(t,0,{td:.1f})'"
+        )
+
+    # Divider line below title
+    f.append(
+        f"drawbox=x=120:y={y0 + len(title_lines)*58 + 10}:w=1040:h=2"
+        f":color=#{ACCENT}@0.7:t=fill:enable='between(t,0,{td:.1f})'"
+    )
+
+    # Subtitle
+    f.append(
+        f"drawtext=fontfile={FONT_REGULAR}:text='Today\\'s UPSC Focus':"
+        f"fontsize=28:fontcolor=8899AA:"
+        f"x=(w-tw)/2:y={y0 + len(title_lines)*58 + 24}:"
+        f"enable='between(t,0,{td:.1f})'"
+    )
+
+    # ════════════════════════════════════════════════════════════
+    # KEY POINTS SECTION (td → end)
+    # ════════════════════════════════════════════════════════════
+
+    # Topic label
+    f.append(
+        f"drawtext=fontfile={FONT_BOLD}:text='{_esc(topic)}':"
+        f"fontsize=26:fontcolor=#{ACCENT}:"
+        f"x=80:y=75:"
+        f"enable='between(t,{td:.1f},{voice_duration})'"
+    )
+
+    # Divider under topic
+    f.append(
+        f"drawbox=x=80:y=112:w=1120:h=2:color=#{ACCENT}@0.35:t=fill:"
+        f"enable='between(t,{td:.1f},{voice_duration})'"
+    )
+
+    for i, point in enumerate(key_points):
+        ts = td + i * point_dur
+        te = ts + point_dur
+
+        # Point counter
+        f.append(
+            f"drawtext=fontfile={FONT_REGULAR}:"
+            f"text='Point {i+1} of {len(key_points)}':"
+            f"fontsize=22:fontcolor=8899AA:"
+            f"x=80:y=148:"
+            f"enable='between(t,{ts:.1f},{te:.1f})'"
+        )
+
+        # Orange bullet bar
+        lines = _wrap(point, 40)
+        bar_h = min(len(lines), 3) * 62
+        f.append(
+            f"drawbox=x=60:y=210:w=8:h={bar_h}"
+            f":color=#{ACCENT}:t=fill:"
+            f"enable='between(t,{ts:.1f},{te:.1f})'"
+        )
+
+        # Point text lines
+        for j, pline in enumerate(lines[:3]):
+            f.append(
+                f"drawtext=fontfile={FONT_BOLD}:text='{_esc(pline)}':"
+                f"fontsize=44:fontcolor=white:"
+                f"x=88:y={210 + j*62}:"
+                f"enable='between(t,{ts:.1f},{te:.1f})'"
+            )
+
+    # ── Fade in / out ─────────────────────────────────────────────
+    f.append('fade=t=in:st=0:d=1.2')
+    f.append(f'fade=t=out:st={voice_duration - 1.2:.1f}:d=1.2')
+
+    return ','.join(f)
+
+
+def _wrap(text, max_chars):
+    """Word-wrap text into lines of max_chars."""
+    words   = str(text).split()
+    lines   = []
+    current = ''
+    for word in words:
+        if len(current) + len(word) + 1 <= max_chars:
+            current = (current + ' ' + word).strip()
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [str(text)[:max_chars]]
 
 
 def _esc(text):
-    """Escape characters that break FFmpeg drawtext."""
-    return (text
+    """Escape special characters for FFmpeg drawtext."""
+    return (str(text)
             .replace('\\', '\\\\')
-            .replace("'",  "\u2019")   # replace straight quote with curly
+            .replace("'",  '\u2019')
             .replace(':',  '\\:')
-            .replace('%',  '\\%'))
+            .replace('%',  '\\%')
+            .replace('[',  '\\[')
+            .replace(']',  '\\]')
+            .replace('&',  'and')
+            .replace('<',  '')
+            .replace('>',  ''))
