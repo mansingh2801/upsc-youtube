@@ -27,7 +27,8 @@ Open with a hook. Cover: What happened, Background, Why it matters, UPSC angle.
 Include GS paper relevance and possible exam question angle.
 End with: Like and subscribe for daily UPSC current affairs.]"""
 
-    for attempt in range(3):
+    waits = [20, 40, 60, 90]
+    for attempt in range(5):
         try:
             res = client.models.generate_content(
                 model='gemini-3.5-flash',
@@ -35,9 +36,9 @@ End with: Like and subscribe for daily UPSC current affairs.]"""
             )
             return _parse(res.text.strip(), article)
         except Exception as e:
-            if '503' in str(e) and attempt < 2:
-                wait = (attempt + 1) * 20
-                print(f'  ⏳ Gemini 503 — retrying in {wait}s...')
+            if '503' in str(e) and attempt < 4:
+                wait = waits[min(attempt, len(waits)-1)]
+                print(f'  ⏳ Gemini 503 — retrying in {wait}s (attempt {attempt+1}/5)...')
                 time.sleep(wait)
             else:
                 raise
