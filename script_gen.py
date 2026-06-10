@@ -14,15 +14,17 @@ Article summary: {article['description']}
 
 Generate a complete video package. Reply in EXACTLY this format:
 
-TOPIC: [one-line topic name]
+TOPIC: [one-line topic name, under 55 characters]
 TITLE: [YouTube title under 70 characters]
 DESCRIPTION: [150-word YouTube description ending with 8 hashtags like #UPSC #IAS #CurrentAffairs]
 TAGS: [12 comma-separated YouTube tags, no #]
 KEYWORDS: [6 comma-separated stock footage search keywords]
+KEY_POINTS: [exactly 5 key facts, semicolon-separated, each under 52 characters, UPSC exam relevant]
 
 SCRIPT:
 [Clean 3-minute narration, 420-450 words, no emojis, no stage directions.
 Open with a hook. Cover: What happened, Background, Why it matters, UPSC angle.
+Include GS paper relevance and possible exam question angle.
 End with: Like and subscribe for daily UPSC current affairs.]"""
 
     for attempt in range(3):
@@ -31,7 +33,7 @@ End with: Like and subscribe for daily UPSC current affairs.]"""
                 model='gemini-3.5-flash',
                 contents=prompt
             )
-            return _parse(res.text.strip(), article['title'])
+            return _parse(res.text.strip(), article)
         except Exception as e:
             if '503' in str(e) and attempt < 2:
                 wait = (attempt + 1) * 20
@@ -41,7 +43,7 @@ End with: Like and subscribe for daily UPSC current affairs.]"""
                 raise
 
 
-def _parse(raw, fallback_topic):
+def _parse(raw, article):
     def extract(label):
         for line in raw.split('\n'):
             if line.strip().upper().startswith(label.upper() + ':'):
@@ -49,14 +51,17 @@ def _parse(raw, fallback_topic):
         return ''
 
     script_start = raw.find('SCRIPT:')
-    script_text = raw[script_start + 7:].strip() if script_start != -1 else raw
-    tags = [t.strip().lstrip('#') for t in extract('TAGS').split(',') if t.strip()]
+    script_text  = raw[script_start + 7:].strip() if script_start != -1 else raw
+    tags         = [t.strip().lstrip('#') for t in extract('TAGS').split(',') if t.strip()]
+    key_points   = [p.strip() for p in extract('KEY_POINTS').split(';') if p.strip()]
 
     return {
-        'topic':       extract('TOPIC') or fallback_topic,
+        'topic':       extract('TOPIC') or article['title'],
         'title':       extract('TITLE'),
         'description': extract('DESCRIPTION'),
         'tags':        tags[:12],
         'keywords':    extract('KEYWORDS'),
-        'script':      script_text
+        'key_points':  key_points[:5],
+        'script':      script_text,
+        'source':      article['source']
     }
