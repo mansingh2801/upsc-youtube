@@ -83,7 +83,7 @@ def process_article(article, idx, total):
 
         print('\n  🎙️  Generating voiceover...')
         _, voice_duration = generate_voice(
-            script_data['script'], output_path=voice_path
+            script_data['script'], output_path=voice_path, speed=1.1
         )
         print(f'     Duration: {voice_duration:.1f}s')
 
