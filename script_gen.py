@@ -6,7 +6,7 @@ from google import genai
 def generate_upsc_script(article):
     client = genai.Client(api_key=os.environ['GEMINI_API_KEY'])
 
-    prompt = f"""You are a senior UPSC educator making a faceless YouTube video for IAS aspirants.
+    prompt = f"""You are a senior UPSC educator making a 50-second YouTube Short for IAS aspirants.
 
 Source: {article['source']}
 Article title: {article['title']}
@@ -15,17 +15,17 @@ Article summary: {article['description']}
 Generate a complete video package. Reply in EXACTLY this format:
 
 TOPIC: [one-line topic name, under 55 characters]
-TITLE: [YouTube title under 70 characters]
-DESCRIPTION: [150-word YouTube description ending with 8 hashtags like #UPSC #IAS #CurrentAffairs]
-TAGS: [12 comma-separated YouTube tags, no #]
-KEYWORDS: [6 comma-separated stock footage search keywords]
-KEY_POINTS: [exactly 5 key facts, semicolon-separated, each under 52 characters, UPSC exam relevant]
+TITLE: [YouTube title under 70 characters — add #Shorts at end]
+DESCRIPTION: [100-word YouTube description ending with #Shorts #UPSC #IAS #CurrentAffairs]
+TAGS: [12 comma-separated YouTube tags including Shorts, no #]
+KEY_POINTS: [exactly 5 key facts, semicolon-separated, each under 45 characters]
 
 SCRIPT:
-[Clean 3-minute narration, 420-450 words, no emojis, no stage directions.
-Open with a hook. Cover: What happened, Background, Why it matters, UPSC angle.
-Include GS paper relevance and possible exam question angle.
-End with: Like and subscribe for daily UPSC current affairs.]"""
+[Clean 50-second narration — exactly 110-120 words total.
+Start with one punchy hook sentence.
+Cover: What happened, why it matters for UPSC.
+Mention GS paper relevance.
+End with: Follow for daily UPSC updates.]"""
 
     waits = [20, 40, 60, 90]
     for attempt in range(5):
@@ -61,7 +61,6 @@ def _parse(raw, article):
         'title':       extract('TITLE'),
         'description': extract('DESCRIPTION'),
         'tags':        tags[:12],
-        'keywords':    extract('KEYWORDS'),
         'key_points':  key_points[:5],
         'script':      script_text,
         'source':      article['source']
