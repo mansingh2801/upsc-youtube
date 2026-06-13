@@ -3,7 +3,14 @@ name: System1 Short Builder
 on:
   repository_dispatch:
     types: [system1_video]
-
+  workflow_dispatch:
+    inputs:
+      title:
+        default: 'Test Short'
+      script:
+        default: 'This is a test script for UPSC current affairs.'
+      audio_url:
+        default: ''
 jobs:
   build_short:
     runs-on: ubuntu-latest
