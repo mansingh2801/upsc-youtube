@@ -103,7 +103,7 @@ def build_slide(out: str, lines: list, dur: float,
             size  = 64 if i == 0 else 52
             filters.append(
                 f"drawtext=text='{s}':fontcolor=0x{color}:fontsize={size}:"
-                f"x=(w-text_w)/2:y={yb + i*90}:font={FONT}:fontweight=bold"
+                f"x=(w-text_w)/2:y={yb + i*90}:font={FONT}"
             )
         filters.append(
             f"drawtext=text='IAS Brief':fontcolor=0x{ACCENT_COLOR}:fontsize=42:"
