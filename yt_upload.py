@@ -14,7 +14,7 @@ from google.auth.transport.requests import Request
 
 def upload_video(video_path, title, description, tags,
                  category_id='27',        # 27 = Education
-                 privacy='public'):
+                 privacy='private'):
     """
     Upload an MP4 to YouTube.
     Returns the YouTube video ID string.
