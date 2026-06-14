@@ -1,210 +1,244 @@
 #!/usr/bin/env python3
 """
-system1_pipeline.py — v2
+system1_pipeline.py — v3
 Triggered by repository_dispatch (event_type: system1_video).
-Env vars: VIDEO_TITLE, VIDEO_SCRIPT, AUDIO_URL, ARTICLE_LINK (optional)
+Env vars: VIDEO_TITLE, ARTICLE_LINK
 
 Flow:
-  1. If ARTICLE_LINK present → resolve Google News URL → fetch full PIB text
-  2. Regenerate richer Gemini script from full text (fallback: VIDEO_SCRIPT)
-  3. Download Sarvam audio
-  4. Build slideshow Short
-  5. Upload to @iasbrief
-
-Does NOT touch any System 2 file.
+  1. curl -L resolves Google News URL → direct PIB URL
+  2. Jina fetches full PIB article text
+  3. Gemini generates structured 5-scene video package
+  4. Kokoro TTS generates per-scene audio (af_heart, 1.2x speed)
+  5. Pexels fetches per-scene background image
+  6. FFmpeg builds per-scene clips (image bg + text overlay + audio)
+  7. Clips concatenated → uploaded to @iasbrief
 """
 
 import os, sys, json, re, subprocess, requests, time
 from pathlib import Path
+import numpy as np
+import soundfile as sf
 
 try:
     from bs4 import BeautifulSoup
     BS4_AVAILABLE = True
 except ImportError:
     BS4_AVAILABLE = False
-    print("bs4 not available — regex-only URL parsing")
 
 # ── CONSTANTS ────────────────────────────────────────────────
 
 BG_COLOR     = '0D1B2A'
 ACCENT_COLOR = 'F4A261'
 TEXT_COLOR   = 'FFFFFF'
-DIM_COLOR    = 'AAAAAA'
 W, H, FPS    = 1080, 1920, 30
 FONT         = 'Sans'
 
 GEMINI_KEY   = os.environ.get('GEMINI_API_KEY', '')
 GEMINI_MODEL = 'gemini-3.5-flash'
 GEMINI_URL   = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
+PEXELS_KEY   = os.environ.get('PEXELS_API_KEY', '')
 
 BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Referer': 'https://www.google.com/',
 }
 
+# Prompt is defined as a module-level constant so it can be reviewed
+# without touching pipeline logic.
+GEMINI_PROMPT = """\
+You are an elite short-form news video producer and UPSC educator.
+Convert this PIB press release into a faceless YouTube Shorts video package.
 
-# ── 0. FULL ARTICLE FETCH ────────────────────────────────────
+Return valid JSON only. No text before or after the JSON block.
+
+{{
+  "title": "Max 8 words. Fact-first. No clickbait.",
+  "description": "3 sentences. What happened, why it matters, UPSC angle.",
+  "hashtags": ["UPSC", "IASBrief", "CurrentAffairs", "Shorts"],
+  "scenes": [
+    {{
+      "scene_number": 1,
+      "narration": "Spoken narration for this scene. Conversational English. Explain clearly — assume the viewer knows nothing about this topic. No jargon without explanation. No emojis. No markdown.",
+      "onscreen_text": "Max 6 words. One standalone fact. Complements narration, does not repeat it.",
+      "search_keywords": ["3 word Pexels search query relevant to this scene"]
+    }}
+  ]
+}}
+
+RULES:
+- Exactly 5 scenes
+- Total narration across all scenes: 170-190 words
+- Scene 1: open with the single most important fact — no throat-clearing
+- Scene 5: close with UPSC angle — GS paper tag (GS1/GS2/GS3/GS4), scheme name, or constitutional article if applicable
+- Narration flows continuously — each scene picks up where the last ended
+- Each scene narration: 30-40 words
+- No political bias. No clickbait. Only facts from the article.
+- onscreen_text must complement narration, not repeat it word for word
+
+ARTICLE TITLE: {title}
+
+ARTICLE TEXT:
+{article_text}"""
+
+
+# ── 0. URL RESOLUTION ────────────────────────────────────────
 
 def resolve_google_news_url(google_url):
-    """Extract real PIB URL from a Google News redirect page."""
+    """
+    Use curl -L to follow Google News redirect chain.
+    Python requests cannot follow Google's JS-based redirects;
+    curl handles the full HTTP redirect chain reliably on GitHub runners.
+    """
     print(f"Resolving: {google_url[:80]}...")
+    try:
+        result = subprocess.run([
+            'curl', '-L', '-s', '-o', '/dev/null', '-w', '%{url_effective}',
+            '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            '--max-redirs', '10',
+            '--connect-timeout', '15',
+            google_url
+        ], capture_output=True, text=True, timeout=25)
+
+        final_url = result.stdout.strip()
+        if 'pib.gov.in' in final_url:
+            print(f"Resolved: {final_url}")
+            return final_url
+        print(f"curl landed on non-PIB URL: {final_url[:80]}")
+    except Exception as e:
+        print(f"curl failed: {e}")
+
+    # Fallback: requests + HTML parse
     try:
         resp = requests.get(google_url, headers=BROWSER_HEADERS,
                             allow_redirects=True, timeout=15)
-
-        # Best case: requests followed a real HTTP redirect to PIB
         if 'pib.gov.in' in resp.url:
-            print(f"Direct redirect worked: {resp.url}")
             return resp.url
-
         html = resp.text
-
-        # meta refresh: content="0; url=..."
-        m = re.search(r'(?i)content=["\']?\d+;\s*url=([^"\'>\s]+)', html)
-        if m:
-            url = m.group(1).strip()
-            if 'pib.gov.in' in url:
-                print(f"Meta refresh match: {url}")
-                return url
-
-        # Any href containing pib.gov.in
         m = re.search(r'href=["\']([^"\']*pib\.gov\.in[^"\']*)["\']', html)
         if m:
-            print(f"Href match: {m.group(1)}")
             return m.group(1)
-
-        # BeautifulSoup sweep (if available)
         if BS4_AVAILABLE:
-            soup = BeautifulSoup(html, 'html.parser')
-            for a in soup.find_all('a', href=True):
+            from bs4 import BeautifulSoup
+            for a in BeautifulSoup(html, 'html.parser').find_all('a', href=True):
                 if 'pib.gov.in' in a['href']:
-                    print(f"BS4 match: {a['href']}")
                     return a['href']
-
-        print("Could not extract PIB URL from Google News page")
-
     except Exception as e:
-        print(f"URL resolve error: {e}")
+        print(f"requests fallback failed: {e}")
 
+    print("URL resolution failed — no PIB URL found")
     return None
 
 
-def fetch_full_article_text(pib_url):
-    """Fetch full PIB article text. Jina primary, direct fetch fallback."""
+# ── 1. FULL ARTICLE FETCH ────────────────────────────────────
 
-    # Primary: Jina.ai — confirmed HTTP 200, ~7500 chars for PIB press releases
+def fetch_full_article_text(pib_url):
+    """
+    Jina primary: confirmed working for PIB (HTTP 200, ~7500 chars).
+    Direct fetch fallback: GitHub runner IPs bypass PIB Cloudflare.
+    """
     try:
         jina_url = f'https://r.jina.ai/{pib_url}'
-        print(f"Trying Jina: {jina_url[:80]}...")
+        print(f"Jina fetch: {jina_url[:80]}...")
         resp = requests.get(jina_url, timeout=30)
         if resp.status_code == 200 and len(resp.text) > 500:
             print(f"Jina OK: {len(resp.text):,} chars")
             return resp.text
-        print(f"Jina: {resp.status_code} / {len(resp.text)} chars — trying fallback")
+        print(f"Jina: {resp.status_code} / {len(resp.text)} chars")
     except Exception as e:
         print(f"Jina failed: {e}")
 
-    # Fallback: direct fetch — GitHub runner IPs bypass PIB Cloudflare
     try:
-        print(f"Trying direct fetch: {pib_url[:80]}...")
+        print(f"Direct fetch: {pib_url[:80]}...")
         resp = requests.get(pib_url, headers=BROWSER_HEADERS, timeout=20)
         if resp.status_code == 200 and len(resp.text) > 500:
             print(f"Direct fetch OK: {len(resp.text):,} chars")
             return resp.text
-        print(f"Direct fetch: {resp.status_code}")
     except Exception as e:
         print(f"Direct fetch failed: {e}")
 
     return None
 
 
-def generate_script_from_full_text(title, full_text):
-    """Call Gemini to produce a 5-point Shorts script from full article text."""
+# ── 2. GEMINI VIDEO PACKAGE ──────────────────────────────────
+
+def generate_video_package(title, article_text):
+    """
+    Single Gemini call produces the full 5-scene structure:
+    title, description, hashtags, and per-scene narration + onscreen_text + search_keywords.
+    All downstream steps (audio, images, video) derive from this one output.
+    """
     if not GEMINI_KEY:
-        print("No GEMINI_API_KEY — skipping script upgrade")
-        return None
+        raise RuntimeError("GEMINI_API_KEY not set")
 
-    prompt = f"""You are a UPSC current affairs educator. Generate a YouTube Shorts script from this PIB press release.
-
-RULES:
-- Exactly 5 lines. No bullets, numbers, symbols, or markdown.
-- Each line: one clear fact or insight, max 12 words.
-- Line 1 must be the single most important fact.
-- Include UPSC-relevant angle: GS paper, policy, scheme, or constitutional significance.
-- Plain text only. Nothing else in your response.
-
-TITLE: {title}
-
-ARTICLE:
-{full_text[:4000]}
-
-Output only the 5 lines, one per line."""
+    prompt = GEMINI_PROMPT.format(
+        title=title,
+        article_text=article_text[:4000]
+    )
 
     payload = {
         'contents': [{'parts': [{'text': prompt}]}],
-        'generationConfig': {'temperature': 0.4, 'maxOutputTokens': 300}
+        'generationConfig': {'temperature': 0.4, 'maxOutputTokens': 1500}
     }
 
     for attempt in range(3):
         try:
             resp = requests.post(
                 f'{GEMINI_URL}?key={GEMINI_KEY}',
-                json=payload, timeout=30
+                json=payload, timeout=45
             )
             if resp.status_code == 200:
-                data = resp.json()
-                raw = data['candidates'][0]['content']['parts'][0]['text'].strip()
-                lines = [l.strip() for l in raw.split('\n') if l.strip()]
-                if len(lines) >= 3:
-                    print(f"Gemini script: {len(lines)} points generated")
-                    return '\n'.join(lines)
-                print(f"Gemini returned too few lines ({len(lines)}) — discarding")
-                return None
+                raw = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                raw = re.sub(r'^```(?:json)?\s*', '', raw)
+                raw = re.sub(r'\s*```$', '', raw)
+                package = json.loads(raw)
+                scenes = package.get('scenes', [])
+                if len(scenes) >= 3:
+                    print(f"Gemini OK: {len(scenes)} scenes — {package.get('title', '')[:60]}")
+                    return package
+                print(f"Gemini: too few scenes ({len(scenes)}) — retrying")
             elif resp.status_code == 503:
                 wait = 20 * (attempt + 1)
-                print(f"Gemini 503 — retry in {wait}s...")
+                print(f"Gemini 503 — retry in {wait}s")
                 time.sleep(wait)
             else:
-                print(f"Gemini error {resp.status_code}: {resp.text[:200]}")
+                print(f"Gemini {resp.status_code}: {resp.text[:200]}")
                 break
+        except json.JSONDecodeError as e:
+            print(f"JSON parse failed (attempt {attempt+1}): {e}")
+            time.sleep(10)
         except Exception as e:
-            print(f"Gemini attempt {attempt+1} failed: {e}")
+            print(f"Gemini attempt {attempt+1}: {e}")
             time.sleep(10)
 
     return None
 
 
-# ── 1. DOWNLOAD AUDIO ────────────────────────────────────────
+# ── 3. KOKORO AUDIO ──────────────────────────────────────────
 
-def download_audio(url, dest='output/voice.wav'):
-    Path('output').mkdir(exist_ok=True)
-    print("Downloading Sarvam audio from Drive...")
-    session = requests.Session()
-    resp = session.get(url, stream=True, timeout=60, allow_redirects=True)
+def generate_scene_audio(narration, output_path, speed=1.2):
+    """
+    Generates audio for one scene narration.
+    Speed 1.2 targets ~65s total for 170-190 word scripts.
+    Voice af_heart matches System 2 (same repo, same Kokoro install).
+    """
+    from kokoro import KPipeline
 
-    # Handle Google Drive large-file confirm page
-    if 'text/html' in resp.headers.get('Content-Type', ''):
-        for key, val in resp.cookies.items():
-            if key.startswith('download_warning'):
-                resp = session.get(f"{url}&confirm={val}", stream=True, timeout=60)
-                break
+    pipeline = KPipeline(lang_code='a')  # 'a' = American English
+    chunks = []
 
-    resp.raise_for_status()
-    with open(dest, 'wb') as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
+    for _, _, audio in pipeline(narration, voice='af_heart', speed=speed):
+        if audio is not None and len(audio) > 0:
+            chunks.append(audio)
 
-    size = os.path.getsize(dest)
-    print(f"Audio saved: {size:,} bytes → {dest}")
-    if size < 2000:
-        raise RuntimeError(f"Audio too small ({size}B) — Drive download likely failed")
-    return dest
+    if not chunks:
+        raise RuntimeError(f"Kokoro produced no audio for: {narration[:60]}")
 
+    audio_data = np.concatenate(chunks)
+    sf.write(output_path, audio_data, 24000)
+    print(f"Audio: {os.path.getsize(output_path):,} bytes → {output_path}")
+    return output_path
 
-# ── 2. VIDEO BUILDER ─────────────────────────────────────────
 
 def get_duration(path):
     result = subprocess.run(
@@ -214,202 +248,218 @@ def get_duration(path):
     for s in json.loads(result.stdout).get('streams', []):
         if 'duration' in s:
             return float(s['duration'])
-    raise RuntimeError("Cannot read audio duration")
+    raise RuntimeError(f"Cannot read duration: {path}")
 
 
-def parse_points(script, max_pts=5):
-    lines = [l.strip() for l in script.split('\n') if len(l.strip()) > 15]
-    if len(lines) >= 3:
-        return lines[:max_pts]
-    sentences = re.split(r'(?<=[.!?])\s+', script.strip())
-    return [s.strip() for s in sentences if len(s.strip()) > 15][:max_pts]
+# ── 4. PEXELS IMAGE FETCH ────────────────────────────────────
+
+def fetch_pexels_image(keywords, scene_num):
+    """
+    Fetches portrait-orientation image for scene background.
+    Falls back to solid dark navy if Pexels fails or key is missing.
+    Portrait orientation = 9:16, correct for YouTube Shorts.
+    """
+    if not PEXELS_KEY:
+        print(f"No PEXELS_API_KEY — solid background for scene {scene_num}")
+        return None
+
+    query = ' '.join(keywords) if isinstance(keywords, list) else str(keywords)
+    try:
+        resp = requests.get(
+            'https://api.pexels.com/v1/search',
+            headers={'Authorization': PEXELS_KEY},
+            params={'query': query, 'per_page': 3, 'orientation': 'portrait'},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            photos = resp.json().get('photos', [])
+            if photos:
+                img_url = photos[0]['src']['large2x']
+                img_resp = requests.get(img_url, timeout=30)
+                path = f'output/scenes/bg_{scene_num:02d}.jpg'
+                with open(path, 'wb') as f:
+                    f.write(img_resp.content)
+                print(f"Pexels scene {scene_num}: '{query}' → {path}")
+                return path
+        print(f"Pexels scene {scene_num}: {resp.status_code} — solid background")
+    except Exception as e:
+        print(f"Pexels scene {scene_num} failed: {e}")
+
+    return None
 
 
-def safe(text):
+# ── 5. VIDEO BUILDER ─────────────────────────────────────────
+
+def safe_text(text):
+    """Strip characters that break FFmpeg drawtext."""
     return (str(text)
             .replace("'", "").replace('"', '').replace(':', ' ')
-            .replace(',', '').replace('\\', '').replace('%', 'pct')
-            .replace('[', '').replace(']', '').strip())
+            .replace('\\', '').replace('%', 'pct')
+            .replace('[', '').replace(']', '')
+            .replace('{', '').replace('}', '')
+            .strip())
 
 
-def wrap(text, max_chars=30):
-    words, lines, cur = text.split(), [], ''
-    for w in words:
-        test = f"{cur} {w}".strip()
-        if len(test) <= max_chars:
-            cur = test
-        else:
-            if cur:
-                lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines[:5]
+def build_scene_clip(scene_num, onscreen_text, audio_path, bg_image_path, output_path):
+    """
+    Builds one scene clip:
+    - Background: Pexels image (scaled+cropped to 1080x1920) or solid navy
+    - Bottom bar: semi-transparent dark overlay with onscreen_text
+    - Watermark: IAS Brief in accent color
+    - Audio: scene narration from Kokoro
+    Duration is driven by actual audio length, not a fixed value.
+    """
+    duration = get_duration(audio_path)
+    text = safe_text(onscreen_text)
 
+    # Text overlay: dark bar at bottom + centered text + watermark
+    overlay = (
+        f"drawbox=x=0:y={H-300}:w={W}:h=300:color=black@0.70:t=fill,"
+        f"drawtext=text='{text}':fontcolor=0x{TEXT_COLOR}:fontsize=46:"
+        f"x=(w-text_w)/2:y={H-220}:font={FONT},"
+        f"drawtext=text='IAS Brief':fontcolor=0x{ACCENT_COLOR}:fontsize=36:"
+        f"x=(w-text_w)/2:y={H-68}:font={FONT}"
+    )
 
-def build_slide(out, lines, dur, is_title=False, num=0, total=0):
-    filters = []
-    if is_title:
-        yb = H // 2 - 150
-        for i, ln in enumerate(lines[:4]):
-            s = safe(ln)
-            if not s:
-                continue
-            color = ACCENT_COLOR if i == 0 else TEXT_COLOR
-            size  = 64 if i == 0 else 52
-            filters.append(
-                f"drawtext=text='{s}':fontcolor=0x{color}:fontsize={size}:"
-                f"x=(w-text_w)/2:y={yb + i*90}:font={FONT}"
-            )
-        filters.append(
-            f"drawtext=text='IAS Brief':fontcolor=0x{ACCENT_COLOR}:fontsize=42:"
-            f"x=(w-text_w)/2:y={H-130}:font={FONT}"
+    if bg_image_path and os.path.exists(bg_image_path):
+        vf = (
+            f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},"
+            f"{overlay}"
         )
+        cmd = [
+            'ffmpeg', '-y',
+            '-loop', '1', '-i', bg_image_path,
+            '-i', audio_path,
+            '-vf', vf,
+            '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-shortest', '-t', f'{duration:.3f}',
+            output_path
+        ]
     else:
-        yb = H // 2 - len(lines) * 40
-        for i, ln in enumerate(lines):
-            s = safe(ln)
-            if not s:
-                continue
-            filters.append(
-                f"drawtext=text='{s}':fontcolor=0x{TEXT_COLOR}:fontsize=50:"
-                f"x=(w-text_w)/2:y={yb + i*75}:font={FONT}"
-            )
-        filters.append(
-            f"drawtext=text='{num}/{total}':fontcolor=0x{DIM_COLOR}:fontsize=36:"
-            f"x=(w-text_w)/2:y={H-120}:font={FONT}"
-        )
-        filters.append(
-            f"drawtext=text='IAS Brief':fontcolor=0x{ACCENT_COLOR}40:fontsize=34:"
-            f"x=(w-text_w)/2:y={H-78}:font={FONT}"
-        )
+        # Solid color fallback
+        vf = f"{overlay}"
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'lavfi',
+            '-i', f'color=c=0x{BG_COLOR}:size={W}x{H}:rate={FPS}:duration={duration:.3f}',
+            '-i', audio_path,
+            '-vf', vf,
+            '-c:v', 'libx264', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-shortest',
+            output_path
+        ]
 
-    vf  = ','.join(filters) if filters else 'null'
-    cmd = [
-        'ffmpeg', '-y', '-f', 'lavfi',
-        '-i', f'color=c=0x{BG_COLOR}:size={W}x{H}:rate={FPS}:duration={dur:.3f}',
-        '-vf', vf, '-c:v', 'libx264', '-preset', 'fast',
-        '-pix_fmt', 'yuv420p', '-t', f'{dur:.3f}', out
-    ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(f"Slide failed:\n{r.stderr[-400:]}")
+        raise RuntimeError(f"Scene {scene_num} build failed:\n{r.stderr[-400:]}")
+    print(f"Scene {scene_num}: {duration:.1f}s → {output_path}")
+    return output_path
 
 
-def build_video(title, script, audio_path):
-    Path('output/slides').mkdir(parents=True, exist_ok=True)
-
-    dur    = get_duration(audio_path)
-    points = parse_points(script)
-    print(f"Audio: {dur:.1f}s  |  Slides: {len(points)+1}")
-
-    title_dur = min(4.0, dur * 0.15)
-    pt_dur    = (dur - title_dur) / max(len(points), 1)
-
-    slides = []
-
-    # Title slide
-    tp = 'output/slides/s00_title.mp4'
-    build_slide(tp, wrap(title, 26), title_dur, is_title=True)
-    slides.append(tp)
-    print(f"  Title slide: {title_dur:.1f}s")
-
-    # Content slides
-    for i, pt in enumerate(points):
-        sp = f'output/slides/s{i+1:02d}.mp4'
-        build_slide(sp, wrap(pt, 32), pt_dur, num=i+1, total=len(points))
-        slides.append(sp)
-        print(f"  Slide {i+1}: {pt_dur:.1f}s — {pt[:50]}...")
-
-    # Write concat list
+def concatenate_clips(clip_paths, output_path):
     clist = 'output/concat.txt'
     with open(clist, 'w') as f:
-        for s in slides:
-            f.write(f"file '{os.path.abspath(s)}'\n")
+        for p in clip_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
 
-    # Concat slides
-    merged = 'output/merged.mp4'
     r = subprocess.run([
         'ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-        '-i', clist, '-c', 'copy', merged
+        '-i', clist, '-c', 'copy', output_path
     ], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"Concat failed:\n{r.stderr[-400:]}")
 
-    # Add audio
-    output = 'output/system1_short.mp4'
-    r = subprocess.run([
-        'ffmpeg', '-y', '-i', merged, '-i', audio_path,
-        '-c:v', 'copy', '-c:a', 'aac', '-shortest', output
-    ], capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"Audio merge failed:\n{r.stderr[-400:]}")
-
-    size = os.path.getsize(output)
-    print(f"Video ready: {size/1024/1024:.1f} MB → {output}")
-    return output
+    size = os.path.getsize(output_path)
+    print(f"Final video: {size/1024/1024:.1f} MB → {output_path}")
+    return output_path
 
 
-# ── 3. UPLOAD ────────────────────────────────────────────────
+# ── 6. UPLOAD ────────────────────────────────────────────────
 
-def upload(video_path, title, script):
-    from yt_upload import upload_video   # existing file, not modified
-    desc = (
-        f"{title}\n\n"
-        f"{script[:400]}\n\n"
-        "#UPSC #IASBrief #CurrentAffairs #Shorts #IAS #PIB"
+def upload(video_path, package):
+    from yt_upload import upload_video
+    title       = package.get('title', 'UPSC Current Affairs')
+    description = (
+        f"{package.get('description', '')}\n\n"
+        + ' '.join(f"#{tag}" for tag in package.get('hashtags', []))
     )
-    tags = ['UPSC', 'IAS', 'IAS Brief', 'Current Affairs', 'Shorts', 'PIB']
-    return upload_video(video_path, title, desc, tags)
+    tags = package.get('hashtags', ['UPSC', 'IAS', 'CurrentAffairs', 'Shorts'])
+    return upload_video(video_path, title, description, tags)
 
 
-# ── 4. MAIN ──────────────────────────────────────────────────
+# ── 7. MAIN ──────────────────────────────────────────────────
 
 def main():
     title        = os.environ.get('VIDEO_TITLE', '').strip()
-    script       = os.environ.get('VIDEO_SCRIPT', '').strip()
-    audio_url    = os.environ.get('AUDIO_URL', '').strip()
     article_link = os.environ.get('ARTICLE_LINK', '').strip()
 
     print("=" * 50)
-    print(f"System1 Short Builder v2")
+    print(f"System1 Short Builder v3")
     print(f"Title:        {title}")
-    print(f"Script:       {len(script)} chars")
-    print(f"Audio:        {audio_url[:70]}...")
-    print(f"Article Link: {article_link[:70] if article_link else 'not provided'}")
+    print(f"Article Link: {article_link[:80]}")
     print("=" * 50)
 
-    if not title or not script or not audio_url:
-        print("ERROR: VIDEO_TITLE, VIDEO_SCRIPT, AUDIO_URL all required")
+    if not title or not article_link:
+        print("ERROR: VIDEO_TITLE and ARTICLE_LINK are both required")
         sys.exit(1)
 
-    # ── Full article fetch + script upgrade ──────────────────
-    final_script = script   # always falls back to RSS snippet
+    Path('output/scenes').mkdir(parents=True, exist_ok=True)
 
-    if article_link:
-        pib_url = resolve_google_news_url(article_link)
-        if pib_url:
-            print(f"Resolved PIB URL: {pib_url}")
-            full_text = fetch_full_article_text(pib_url)
-            if full_text:
-                better_script = generate_script_from_full_text(title, full_text)
-                if better_script:
-                    final_script = better_script
-                    print("Script upgraded from full article text.")
-                else:
-                    print("Gemini script generation failed — using original VIDEO_SCRIPT.")
-            else:
-                print("Full text fetch failed — using original VIDEO_SCRIPT.")
-        else:
-            print("URL resolution failed — using original VIDEO_SCRIPT.")
-    else:
-        print("No ARTICLE_LINK — using VIDEO_SCRIPT as-is.")
+    # ── Step 1: Resolve URL ──────────────────────────────────
+    pib_url = resolve_google_news_url(article_link)
+    if not pib_url:
+        print("FATAL: Could not resolve PIB URL — aborting")
+        sys.exit(1)
 
-    # ── Build + upload ───────────────────────────────────────
-    audio_path = download_audio(audio_url)
-    video_path = build_video(title, final_script, audio_path)
-    print("Uploading to YouTube...")
-    result = upload(video_path, title, final_script)
+    # ── Step 2: Fetch article text ───────────────────────────
+    article_text = fetch_full_article_text(pib_url)
+    if not article_text:
+        print("FATAL: Could not fetch article text — aborting")
+        sys.exit(1)
+    print(f"Article: {len(article_text):,} chars")
+
+    # ── Step 3: Generate video package ──────────────────────
+    package = generate_video_package(title, article_text)
+    if not package:
+        print("FATAL: Gemini failed — aborting")
+        sys.exit(1)
+
+    scenes = package['scenes']
+    print(f"\nVideo title: {package.get('title', '')}")
+    print(f"Scenes: {len(scenes)}\n")
+
+    # ── Steps 4-5: Per-scene audio + image + clip ────────────
+    clip_paths = []
+    for scene in scenes:
+        n            = scene['scene_number']
+        narration    = scene.get('narration', '')
+        onscreen     = scene.get('onscreen_text', '')
+        keywords     = scene.get('search_keywords', ['India government news'])
+
+        print(f"── Scene {n} ───────────────────────────────")
+        print(f"  Narration ({len(narration.split())}w): {narration[:70]}...")
+        print(f"  Onscreen: {onscreen}")
+
+        audio_path = f'output/scenes/audio_{n:02d}.wav'
+        generate_scene_audio(narration, audio_path, speed=1.2)
+
+        bg_path   = fetch_pexels_image(keywords, n)
+        clip_path = f'output/scenes/clip_{n:02d}.mp4'
+        build_scene_clip(n, onscreen, audio_path, bg_path, clip_path)
+        clip_paths.append(clip_path)
+
+    # ── Step 6: Concatenate ──────────────────────────────────
+    print("\n── Concatenating ───────────────────────────")
+    final_video = 'output/system1_short.mp4'
+    concatenate_clips(clip_paths, final_video)
+
+    total_duration = sum(get_duration(p) for p in clip_paths)
+    print(f"Total duration: {total_duration:.1f}s")
+
+    # ── Step 7: Upload ───────────────────────────────────────
+    print("\nUploading to YouTube...")
+    result = upload(final_video, package)
     print(f"Upload complete: {result}")
 
 
