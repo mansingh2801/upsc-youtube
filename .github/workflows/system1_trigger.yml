@@ -3,14 +3,7 @@ name: System1 Short Builder
 on:
   repository_dispatch:
     types: [system1_video]
-  workflow_dispatch:
-    inputs:
-      title:
-        default: 'Test Short'
-      script:
-        default: 'This is a test script for UPSC current affairs.'
-      audio_url:
-        default: ''
+
 jobs:
   build_short:
     runs-on: ubuntu-latest
@@ -36,12 +29,12 @@ jobs:
 
       - name: Build and upload Short
         run: python system1_pipeline.py
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-        YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-        YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-        VIDEO_TITLE: ${{ github.event.client_payload.title }}
-        VIDEO_SCRIPT: ${{ github.event.client_payload.script }}
-        AUDIO_URL: ${{ github.event.client_payload.audio_url }}
-        ARTICLE_LINK: ${{ github.event.client_payload.article_link }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          VIDEO_TITLE: ${{ github.event.client_payload.title }}
+          VIDEO_SCRIPT: ${{ github.event.client_payload.script }}
+          AUDIO_URL: ${{ github.event.client_payload.audio_url }}
+          ARTICLE_LINK: ${{ github.event.client_payload.article_link }}
