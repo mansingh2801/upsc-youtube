@@ -35,13 +35,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build and upload Short
-        env:
-          GEMINI_API_KEY:        ${{ secrets.GEMINI_API_KEY }}
-          YOUTUBE_CLIENT_ID:     ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          VIDEO_TITLE:           ${{ github.event.client_payload.title }}
-          VIDEO_SCRIPT:          ${{ github.event.client_payload.script }}
-          AUDIO_URL:             ${{ github.event.client_payload.audio_url }}
-          ARTICLE_LINK: ${{ github.event.client_payload.article_link }}      
-          run: python system1_pipeline.py
+        run: python system1_pipeline.py
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+        YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+        YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        VIDEO_TITLE: ${{ github.event.client_payload.title }}
+        VIDEO_SCRIPT: ${{ github.event.client_payload.script }}
+        AUDIO_URL: ${{ github.event.client_payload.audio_url }}
+        ARTICLE_LINK: ${{ github.event.client_payload.article_link }}
