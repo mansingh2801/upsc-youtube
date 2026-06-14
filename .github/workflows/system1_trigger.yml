@@ -19,10 +19,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install FFmpeg
+      - name: Install system dependencies
         run: |
           sudo apt-get update --fix-missing
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg espeak-ng
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -31,10 +31,9 @@ jobs:
         run: python system1_pipeline.py
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           VIDEO_TITLE: ${{ github.event.client_payload.title }}
-          VIDEO_SCRIPT: ${{ github.event.client_payload.script }}
-          AUDIO_URL: ${{ github.event.client_payload.audio_url }}
           ARTICLE_LINK: ${{ github.event.client_payload.article_link }}
